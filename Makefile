@@ -1,13 +1,7 @@
-# Auto-install https://github.com/makeplus/makes at a fixed revision.
-MAKES := .cache/makes
-MAKES-COMMIT ?= a5085e7f78210be125307728e8cd5665f383c9ad
-$(shell [ -d $(MAKES) ] || ( \
-  git clone -q https://github.com/makeplus/makes $(MAKES) && \
-  git -C $(MAKES) reset -q --hard $(MAKES-COMMIT)))
-ifneq ($(shell git -C $(MAKES) rev-parse HEAD), \
-       $(shell git -C $(MAKES) rev-parse $(MAKES-COMMIT)))
-$(error $(MAKES) is not at the expected revision)
-endif
+# Auto-install https://github.com/makeplus/makes.
+MAKES ?= .cache/makes
+$(shell test -d $(MAKES) || \
+  git clone -q https://github.com/makeplus/makes $(MAKES))
 
 include $(MAKES)/init.mk
 include $(MAKES)/clojure.mk
