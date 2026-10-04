@@ -13,6 +13,7 @@ include $(MAKES)/init.mk
 include $(MAKES)/clojure.mk
 GLOAT-VERSION := 0.1.90
 include $(MAKES)/gloat.mk
+include $(MAKES)/gh.mk
 include $(MAKES)/go.mk
 include $(MAKES)/perl.mk
 include $(MAKES)/shellcheck.mk
@@ -49,6 +50,15 @@ RELEASE-LIB := $(RELEASE-LIB-DIR)/$(LIB-NAME)
 ARCHIVE := dist/$(RELEASE-NAME).tar.xz
 SOURCE-DATE-EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null || date +%s)
 TAR ?= $(if $(IS-MACOS),gtar,tar)
+RELEASE-REPO := yamlstar/yamlstar-plugin-parser-toml
+RELEASE-WORKFLOW := release.yaml
+RELEASE-SCRIPT := util/release
+RELEASE-CMD = \
+  PERL=$(PERL) \
+  GH=$(GH) \
+  RELEASE_REPO=$(RELEASE-REPO) \
+  RELEASE_WORKFLOW=$(RELEASE-WORKFLOW) \
+  $(RELEASE-SCRIPT)
 
 MAKES-CLEAN += dist .cache/release
 
@@ -73,7 +83,7 @@ test: $(CLOJURE) $(GO) $(CLJ-CONFIG) generate $(SHARED-LIB) $(SHELLCHECK)
 	env -u GOROOT CGO_ENABLED=1 $(GO) test ./shared
 	$(call compile-abi-test,.cache/abi-test)
 	YAMLSTAR_LIBRARY_PATH=$(abspath lib) .cache/abi-test
-	$(SHELLCHECK) util/test-archive
+	$(SHELLCHECK) util/release util/test-archive
 
 test-yamlstar: $(CLOJURE) $(CLJ-CONFIG)
 	CLJ_CONFIG=$(CLJ-CONFIG) $(CLOJURE) -M:yamlstar-test
@@ -104,6 +114,69 @@ release-check: $(PERL)
 	esac
 
 release-archive: $(ARCHIVE)
+
+export OLD_VERSION := $o
+export NEW_VERSION := $(or $v,$n)
+ifdef d
+export YS_RELEASE_DRYRUN := 1
+endif
+ifdef a
+export YS_RELEASE_ALLOW_BRANCH := 1
+endif
+
+release: $(PERL) $(GH)
+ifndef v
+	$(error 'make release' requires v=NEW_VERSION)
+endif
+	$(RELEASE-CMD) release "$(o)" "$(v)"
+
+release-list: $(PERL)
+	$(RELEASE-CMD) list
+
+release-sanity-check: $(PERL)
+ifndef v
+	$(error 'make release-sanity-check' requires v=NEW_VERSION)
+endif
+	$(RELEASE-CMD) sanity-check "$(o)" "$(v)"
+
+release-version-bump: $(PERL)
+ifndef v
+	$(error 'make release-version-bump' requires v=NEW_VERSION)
+endif
+	$(RELEASE-CMD) version-bump "$(o)" "$(v)"
+
+release-pull: $(PERL)
+	$(RELEASE-CMD) pull
+
+release-commit: $(PERL)
+ifndef v
+	$(error 'make release-commit' requires v=NEW_VERSION)
+endif
+	$(RELEASE-CMD) commit "$(v)"
+
+release-tag: $(PERL)
+ifndef v
+	$(error 'make release-tag' requires v=NEW_VERSION)
+endif
+	$(RELEASE-CMD) tag "$(v)"
+
+release-push: $(PERL)
+ifndef v
+	$(error 'make release-push' requires v=NEW_VERSION)
+endif
+	$(RELEASE-CMD) push "$(v)"
+
+release-build-github: $(PERL) $(GH)
+ifndef v
+	$(error 'make release-build-github' requires v=NEW_VERSION)
+endif
+	$(RELEASE-CMD) build-github "$(v)"
+
+release-retry: $(PERL) $(GH)
+ifndef v
+	$(error 'make release-retry' requires v=NEW_VERSION)
+endif
+	$(RELEASE-CMD) retry "$(v)"
 
 $(ARCHIVE): release-check test $(RELEASE-LIB) plugin.edn \
   include/yamlstar_plugin.h License ReadMe.md util/test-archive
@@ -158,7 +231,7 @@ $(TOML-TEST-DECODER): generate $(GO)
 test-conformance: $(TOML-TEST) $(TOML-TEST-DECODER)
 	$(TOML-TEST) test -toml=1.1 -decoder=$(abspath $(TOML-TEST-DECODER))
 
-generate: $(GENERATED-CLJ) $(GLOAT-LINK)
+generate: $(GENERATED-CLJ) $(GLOAT-LINK) $(GLOAT)
 	rm -fr $(GO-GENERATED-WORK)
 	mkdir -p $(GO-GENERATED-WORK)
 	env -u GOROOT GLOAT_GLJDEPS=$(abspath gljdeps.edn) \
@@ -177,4 +250,4 @@ generate-check: generate
 	@git diff --exit-code -- $(GENERATED-CLJ) pkg/toml_parser/core
 
 clean::
-	rm -fr target pkg lib .cache/gloat-srcs .cache/go-generate
+	rm -fr target lib .cpcache .cache/gloat-srcs .cache/go-generate

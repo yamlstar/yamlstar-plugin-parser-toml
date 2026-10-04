@@ -1,0 +1,505 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+command=${1:-list}
+old_version=${2:-${OLD_VERSION:-}}
+new_version=${3:-${NEW_VERSION:-}}
+perl=${PERL:?PERL must name the project-managed Perl}
+gh=${GH:-gh}
+release_repo=${RELEASE_REPO:-yamlstar/yamlstar-plugin-parser-toml}
+release_workflow=${RELEASE_WORKFLOW:-release.yaml}
+dry_run=${YS_RELEASE_DRYRUN:-}
+version_files=(Makefile Meta plugin.edn test/abi.c)
+
+die() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+require_new_version() {
+  [[ -n $new_version ]] || die 'A new version is required'
+  [[ $new_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "Invalid version: $new_version"
+}
+
+manifest_version() {
+  # The dollar signs below are Perl variables, not shell expansions.
+  # shellcheck disable=SC2016
+  "$perl" -ne 'print "$1\n" if /:version "([^"]+)"/' plugin.edn
+}
+
+meta_version() {
+  # The dollar signs below are Perl variables, not shell expansions.
+  # shellcheck disable=SC2016
+  "$perl" -ne 'print "$1\n" if /^version:\s*(\S+)/' Meta
+}
+
+make_version() {
+  # The dollar signs below are Perl variables, not shell expansions.
+  # shellcheck disable=SC2016
+  "$perl" -ne 'print "$1\n" if /^VERSION := (\S+)/' Makefile
+}
+
+abi_version() {
+  # The dollar signs below are Perl variables, not shell expansions.
+  # shellcheck disable=SC2016
+  "$perl" -ne \
+    'print "$1\n" if /^#define PLUGIN_VERSION "([^"]+)"/' \
+    test/abi.c
+}
+
+current_version() {
+  local manifest meta makefile abi
+  manifest=$(manifest_version)
+  meta=$(meta_version)
+  makefile=$(make_version)
+  abi=$(abi_version)
+  [[ -n $manifest ]] || die 'No version found in plugin.edn'
+  [[ $manifest == "$meta" ]] ||
+    die "Meta version $meta does not match plugin.edn $manifest"
+  [[ $manifest == "$makefile" ]] ||
+    die "Makefile version $makefile does not match plugin.edn $manifest"
+  [[ $manifest == "$abi" ]] ||
+    die "ABI test version $abi does not match plugin.edn $manifest"
+  printf '%s\n' "$manifest"
+}
+
+binary_tag() {
+  printf '%s\n' "$1"
+}
+
+module_tag() {
+  printf 'v%s\n' "$1"
+}
+
+tag_points_to_head() {
+  local tag=$1
+  git rev-parse "$tag" >/dev/null 2>&1 ||
+    die "Tag $tag does not exist"
+  [[ $(git rev-parse "$tag^{commit}") == $(git rev-parse HEAD) ]] ||
+    die "Tag $tag does not point to HEAD"
+}
+
+confirm() {
+  local prompt=$1
+  local answer
+  read -r -p "$prompt [Y/n] " answer || return 1
+  [[ -z $answer || $answer =~ ^[Yy]$ ]]
+}
+
+do_list() {
+  cat <<'EOF'
+TOML Parser Plugin Release Process
+==================================
+
+Publish the already-versioned first release:
+  make release v=0.1.0
+
+Run a complete version-bump release:
+  make release o=0.1.0 v=0.1.1
+
+Preview either workflow without changing anything:
+  make release o=0.1.0 v=0.1.1 d=1
+
+Individual steps:
+  make release-sanity-check o=OLD_VERSION v=NEW_VERSION
+  make release-version-bump o=OLD_VERSION v=NEW_VERSION
+  make release-pull
+  make release-commit v=NEW_VERSION
+  make release-tag v=NEW_VERSION
+  make release-push v=NEW_VERSION
+  make release-build-github v=NEW_VERSION
+  make release-retry v=VERSION
+
+Each release creates VERSION for binary assets and vVERSION for Go.
+Set a=1 to allow a release from a branch other than main.
+EOF
+}
+
+check_new_tag() {
+  local tag=$1
+  if git rev-parse "$tag" >/dev/null 2>&1; then
+    if [[ $(git rev-parse "$tag^{commit}") != \
+          $(git rev-parse HEAD) ]]; then
+      die "Tag $tag already exists away from HEAD"
+    fi
+  fi
+}
+
+do_sanity_check() {
+  require_new_version
+
+  local current branch
+  current=$(current_version)
+  old_version=${old_version:-$current}
+
+  [[ $current == "$old_version" ]] ||
+    die "Current version $current does not match old version $old_version"
+
+  branch=$(git branch --show-current)
+  if [[ -z $dry_run && -z ${YS_RELEASE_ALLOW_BRANCH:-} ]]; then
+    [[ $branch == main ]] ||
+      die 'Releases require branch main; set a=1 to override'
+  fi
+
+  if [[ -z $dry_run && -n $(git status --porcelain) ]]; then
+    git status --short >&2
+    die 'Working tree is not clean'
+  fi
+
+  check_new_tag "$(binary_tag "$new_version")"
+  check_new_tag "$(module_tag "$new_version")"
+
+  printf 'Current version: %s\n' "$current"
+  printf 'Release version: %s\n' "$new_version"
+  printf 'Release branch: %s\n' "$branch"
+  printf 'All sanity checks passed\n'
+}
+
+do_version_bump() {
+  require_new_version
+
+  local current
+  current=$(current_version)
+  old_version=${old_version:-$current}
+  [[ $current == "$old_version" ]] ||
+    die "Current version $current does not match old version $old_version"
+
+  if [[ $current == "$new_version" ]]; then
+    printf 'Version is already %s\n' "$new_version"
+    return
+  fi
+
+  if [[ -n $dry_run ]]; then
+    printf 'Would bump version from %s to %s\n' \
+      "$current" "$new_version"
+    return
+  fi
+
+  # The dollar signs below are Perl variables, not shell expansions.
+  # shellcheck disable=SC2016
+  RELEASE_OLD=$current RELEASE_NEW=$new_version "$perl" -pi -e '
+    BEGIN {
+      $old = $ENV{RELEASE_OLD};
+      $new = $ENV{RELEASE_NEW};
+    }
+    s/^VERSION := \Q$old\E$/VERSION := $new/;
+  ' Makefile
+  # shellcheck disable=SC2016
+  RELEASE_OLD=$current RELEASE_NEW=$new_version "$perl" -pi -e '
+    BEGIN {
+      $old = $ENV{RELEASE_OLD};
+      $new = $ENV{RELEASE_NEW};
+    }
+    s/^version:\s*\Q$old\E$/version: $new/;
+  ' Meta
+  # shellcheck disable=SC2016
+  RELEASE_OLD=$current RELEASE_NEW=$new_version "$perl" -pi -e '
+    BEGIN {
+      $old = $ENV{RELEASE_OLD};
+      $new = $ENV{RELEASE_NEW};
+    }
+    s/^ :version "\Q$old\E"$/ :version "$new"/;
+  ' plugin.edn
+  # shellcheck disable=SC2016
+  RELEASE_OLD=$current RELEASE_NEW=$new_version "$perl" -pi -e '
+    BEGIN {
+      $old = $ENV{RELEASE_OLD};
+      $new = $ENV{RELEASE_NEW};
+    }
+    s/^#define PLUGIN_VERSION "\Q$old\E"$/#define PLUGIN_VERSION "$new"/;
+  ' test/abi.c
+
+  [[ $(current_version) == "$new_version" ]] ||
+    die 'Version bump did not update every version file'
+  printf 'Bumped version from %s to %s\n' "$current" "$new_version"
+  git status --short -- "${version_files[@]}"
+}
+
+do_commit() {
+  require_new_version
+  [[ $(current_version) == "$new_version" ]] ||
+    die "Version files do not contain $new_version"
+
+  if [[ -z $(git status --porcelain -- "${version_files[@]}") ]]; then
+    printf 'No version changes to commit\n'
+    return
+  fi
+
+  if [[ -n $dry_run ]]; then
+    printf 'Would commit release version %s\n' "$new_version"
+    return
+  fi
+
+  git add "${version_files[@]}"
+  git commit \
+    -m "Release plugin version $new_version" \
+    -m "Update embedded manifest and build metadata for $new_version."
+}
+
+create_tag() {
+  local tag=$1
+  if git rev-parse "$tag" >/dev/null 2>&1; then
+    tag_points_to_head "$tag"
+    printf 'Tag %s already points to HEAD\n' "$tag"
+    return
+  fi
+
+  if [[ -n $dry_run ]]; then
+    printf 'Would create tag %s\n' "$tag"
+    return
+  fi
+
+  git tag "$tag"
+  printf 'Created tag %s\n' "$tag"
+}
+
+do_tag() {
+  require_new_version
+  [[ $(current_version) == "$new_version" ]] ||
+    die "Version files do not contain $new_version"
+
+  create_tag "$(binary_tag "$new_version")"
+  create_tag "$(module_tag "$new_version")"
+}
+
+do_push() {
+  require_new_version
+
+  local branch binary module
+  branch=$(git branch --show-current)
+  binary=$(binary_tag "$new_version")
+  module=$(module_tag "$new_version")
+  [[ -n $branch ]] || die 'Cannot release from detached HEAD'
+  tag_points_to_head "$binary"
+  tag_points_to_head "$module"
+
+  if [[ -n $dry_run ]]; then
+    printf 'Would publish branch %s and tags %s and %s to origin\n' \
+      "$branch" "$binary" "$module"
+    return
+  fi
+
+  git push --atomic origin "$branch" "$binary" "$module"
+  printf 'Published branch %s and tags %s and %s\n' \
+    "$branch" "$binary" "$module"
+}
+
+do_build_github() {
+  require_new_version
+
+  local branch run_id binary module
+  branch=$(git branch --show-current)
+  binary=$(binary_tag "$new_version")
+  module=$(module_tag "$new_version")
+  [[ -n $branch ]] || die 'Cannot release from detached HEAD'
+  tag_points_to_head "$binary"
+  tag_points_to_head "$module"
+
+  if [[ -n $dry_run ]]; then
+    printf 'Would run %s for version %s in %s\n' \
+      "$release_workflow" "$new_version" "$release_repo"
+    return
+  fi
+
+  git ls-remote --exit-code --tags origin \
+    "refs/tags/$binary" >/dev/null ||
+    die "Tag $binary is not available on origin"
+  git ls-remote --exit-code --tags origin \
+    "refs/tags/$module" >/dev/null ||
+    die "Tag $module is not available on origin"
+
+  "$gh" workflow run "$release_workflow" \
+    --repo "$release_repo" \
+    --ref "$branch" \
+    -f "version=$new_version"
+  sleep 5
+  run_id=$(
+    "$gh" run list \
+      --workflow "$release_workflow" \
+      --repo "$release_repo" \
+      --branch "$branch" \
+      --event workflow_dispatch \
+      --limit 1 \
+      --json databaseId \
+      --jq '.[0].databaseId'
+  )
+  [[ -n $run_id ]] || die 'Could not find the release workflow run'
+  printf 'Watching release workflow run %s\n' "$run_id"
+  "$gh" run watch "$run_id" \
+    --repo "$release_repo" \
+    --exit-status \
+    --interval 10
+}
+
+do_rerun_failed_github() {
+  local commit run_id
+  commit=$(git rev-parse "$(binary_tag "$new_version")^{commit}")
+  run_id=$(
+    "$gh" run list \
+      --workflow "$release_workflow" \
+      --repo "$release_repo" \
+      --commit "$commit" \
+      --event workflow_dispatch \
+      --status failure \
+      --limit 1 \
+      --json databaseId \
+      --jq '.[0].databaseId'
+  )
+  [[ -n $run_id ]] ||
+    die "Could not find a failed release run for $new_version"
+  printf 'Rerunning failed jobs from workflow run %s\n' "$run_id"
+  "$gh" run rerun "$run_id" --repo "$release_repo" --failed
+  "$gh" run watch "$run_id" \
+    --repo "$release_repo" \
+    --exit-status \
+    --interval 10
+}
+
+do_retry() {
+  require_new_version
+  [[ $(current_version) == "$new_version" ]] ||
+    die "Version files do not contain $new_version"
+
+  local branch asset_count binary module
+  branch=$(git branch --show-current)
+  binary=$(binary_tag "$new_version")
+  module=$(module_tag "$new_version")
+  [[ -n $branch ]] || die 'Cannot release from detached HEAD'
+  git rev-parse "$binary" >/dev/null 2>&1 ||
+    die "Tag $binary does not exist"
+  git rev-parse "$module" >/dev/null 2>&1 ||
+    die "Tag $module does not exist"
+  git merge-base --is-ancestor "$binary^{commit}" HEAD ||
+    die "Tag $binary is not an ancestor of HEAD"
+  git merge-base --is-ancestor "$module^{commit}" HEAD ||
+    die "Tag $module is not an ancestor of HEAD"
+  if [[ -z $dry_run && -n $(git status --porcelain) ]]; then
+    git status --short >&2
+    die 'Working tree is not clean'
+  fi
+
+  asset_count=$(
+    "$gh" release view "$binary" \
+      --repo "$release_repo" \
+      --json assets \
+      --jq '.assets | length' 2>/dev/null || printf '0\n'
+  )
+
+  if [[ -n $dry_run ]]; then
+    if [[ $asset_count == 0 ]]; then
+      printf 'Would update branch %s and tags %s and %s, then rerun ' \
+        "$branch" "$binary" "$module"
+      printf 'the workflow\n'
+    else
+      printf 'Would rerun failed jobs for release %s\n' "$new_version"
+    fi
+    return
+  fi
+
+  if [[ $asset_count != 0 ]]; then
+    do_rerun_failed_github
+    return
+  fi
+
+  git tag -f "$binary" HEAD
+  git tag -f "$module" HEAD
+  git push --atomic origin \
+    "$branch" \
+    "+refs/tags/$binary:refs/tags/$binary" \
+    "+refs/tags/$module:refs/tags/$module"
+  do_build_github
+}
+
+do_pull() {
+  local before
+  if ! git rev-parse --abbrev-ref '@{upstream}' >/dev/null 2>&1; then
+    printf 'No upstream branch configured; skipping pull\n'
+    return
+  fi
+  before=$(git rev-parse HEAD)
+  git pull --rebase
+  [[ $(git rev-parse HEAD) == "$before" ]] ||
+    die 'New changes were pulled; rerun the release command'
+}
+
+do_release() {
+  require_new_version
+  do_sanity_check
+
+  if [[ -n $dry_run ]]; then
+    do_version_bump
+    printf 'Would commit, tag, publish, and start the release workflow\n'
+    return
+  fi
+
+  do_pull
+  do_sanity_check
+
+  if [[ $(current_version) != "$new_version" ]]; then
+    confirm "Bump version to $new_version?" ||
+      die 'Release stopped before the version bump'
+    do_version_bump
+  fi
+  if [[ -n $(git status --porcelain -- "${version_files[@]}") ]]; then
+    confirm "Commit version $new_version?" ||
+      die 'Release stopped before the version commit'
+    do_commit
+  fi
+  if ! git rev-parse "$(binary_tag "$new_version")" \
+      >/dev/null 2>&1 ||
+     ! git rev-parse "$(module_tag "$new_version")" \
+      >/dev/null 2>&1; then
+    confirm "Create release tags for $new_version?" ||
+      die 'Release stopped before tag creation'
+    do_tag
+  fi
+  if confirm 'Publish the branch and tags to origin?'; then
+    do_push
+  fi
+  if confirm 'Start and watch the GitHub release workflow?'; then
+    do_build_github
+  fi
+}
+
+case $command in
+  list)
+    do_list
+    ;;
+  sanity-check)
+    do_sanity_check
+    ;;
+  version-bump)
+    do_version_bump
+    ;;
+  pull)
+    do_pull
+    ;;
+  commit)
+    new_version=$old_version
+    do_commit
+    ;;
+  tag)
+    new_version=$old_version
+    do_tag
+    ;;
+  push)
+    new_version=$old_version
+    do_push
+    ;;
+  build-github)
+    new_version=$old_version
+    do_build_github
+    ;;
+  retry)
+    new_version=$old_version
+    do_retry
+    ;;
+  release)
+    do_release
+    ;;
+  *)
+    die "Unknown release command: $command"
+    ;;
+esac
