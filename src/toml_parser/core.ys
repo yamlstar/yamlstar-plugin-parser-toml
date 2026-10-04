@@ -1,0 +1,913 @@
+!ys-0
+
+max-depth =: 128
+newline =: C(10)
+tab =: C(9)
+carriage-return =: C(13)
+
+defn- parser-error(state message):
+  text =: str('TOML parse error at line ' state.line)
+  text +=: str(', column ' state.column C(58) ' ' message)
+  data =: :{:line state.line
+            :column state.column
+            :offset state.index}
+  throw: ex-info(text data)
+
+defn- initial-state(text):
+  crlf =: carriage-return:S + newline:S
+  when text.replace(crlf '').has?(carriage-return:S):
+    data =: :{:line 1 :column 1 :offset 0}
+    message =: 'TOML parse error: bare carriage return'
+    throw: ex-info(message data)
+  chars =: text.replace(crlf newline:S):V
+  =>: :{:chars chars :index 0 :line 1 :column 1}
+
+defn peek-char:
+  (state): peek-char(state 0)
+  (state offset):
+    index =: state.index + offset
+    =>: state.chars.$index
+
+defn- advance(state):
+  c =: peek-char(state)
+  if c:
+    then:
+      state
+        .update(:index inc)
+        .put(:line if((c == newline) state.line.++ state.line))
+        .put(:column if((c == newline) 1 state.column.++))
+    else: state
+
+defn- advance-n(state n):
+  nth: iterate(advance state) n
+
+defn- starts-with?(state text):
+  text:seq ==:
+    map \(peek-char state _): range(text.#)
+
+defn- expect-char(state expected):
+  if expected == peek-char(state):
+    advance: state
+    parser-error state: "expected $(pr-str(expected))"
+
+defn- horizontal-space?(c):
+  (c == C(' ')) || (c == tab)
+
+defn- skip-horizontal(state):
+  loop state state:
+    if horizontal-space?(peek-char(state)):
+      recur: advance(state)
+      else: state
+
+defn- control-char?(c):
+  c &&: (int(c) < 0x20) || (int(c) == 0x7f)
+
+defn- read-comment(state):
+  loop state state, chars []:
+    c =: peek-char(state)
+    cond:
+      nil?(c) || (c == newline):
+        comment =: chars:join
+        vector: comment state
+      control-char?(c) && (c != tab):
+        parser-error state: 'control character in comment'
+      else:
+        recur: advance(state), chars.conj(c)
+
+defn- join-comments(comments):
+  when comments:seq:
+    comments.join(newline:S)
+
+defn- codepoint-string(value):
+  try:
+    C(value): .S()
+    catch Exception e:
+      value =: value - 0x10000
+      high =: 0xd800 + (value // 0x400)
+      low =: 0xdc00 + (value % 0x400)
+      C(high):S +: C(low):S
+
+defn- hex-value(c):
+  cond:
+    int(C("0")) <= int(c) <= int(C("9")): int(c) - int(C("0"))
+    int(C("a")) <= int(c) <= int(C("f")): 10 + (int(c) - int(C("a")))
+    int(C("A")) <= int(c) <= int(C("F")): 10 + (int(c) - int(C("A")))
+
+defn- read-unicode-escape(state digits):
+  loop state state, left digits, value 0:
+    if left.!:
+      then:
+        if (value > 0x10ffff) || (0xd800 <= value <= 0xdfff):
+          parser-error state: 'invalid Unicode scalar value'
+          vector: codepoint-string(value) state
+      else:
+        digit =: hex-value(peek-char(state))
+        if digit:
+          recur: advance(state), left.--, ((value * 16) + digit)
+          parser-error state: 'invalid Unicode escape'
+
+defn- read-basic-escape(state):
+  c =: peek-char(state)
+  state =: advance(state)
+  cond:
+    c == C('b'): :[C(8):S state]
+    c == C('t'): :[tab:S state]
+    c == C('n'): :[newline:S state]
+    c == C('f'): :[C(12):S state]
+    c == C('r'): :[carriage-return:S state]
+    c == C('e'): :[C(27):S state]
+    c == C('"'): :['"' state]
+    c == C(92): :[C(92):S state]
+    c == C('x'): read-unicode-escape(state 2)
+    c == C('u'): read-unicode-escape(state 4)
+    c == C('U'): read-unicode-escape(state 8)
+    else: parser-error(state 'invalid escape sequence')
+
+defn- trim-first-newline(state):
+  if peek-char(state) == newline:
+    advance: state
+    else: state
+
+defn- quote-run(state quote):
+  loop n 0:
+    if quote == peek-char(state n):
+      recur: n.++
+      else: n
+
+defn- read-basic-string(state multiline?):
+  width =: if(multiline? 3 1)
+  state =: advance-n(state width)
+  state :if multiline? =: trim-first-newline(state)
+  loop state state, out []:
+    c =: peek-char(state)
+    cond:
+      nil?(c):
+        parser-error state: 'unterminated basic string'
+      multiline? && (c == C('"')):
+        run =: quote-run(state C('"'))
+        cond:
+          run < 3:
+            recur: advance-n(state run), into(out repeat(run C('"')))
+          run <= 5:
+            value =: into(out repeat((run - 3) C('"'))):join
+            vector: value advance-n(state run)
+          else:
+            parser-error state: 'too many quotes at string end'
+      multiline?.! && (c == C('"')):
+        vector: out:join advance(state)
+      multiline?.! && (c == newline):
+        parser-error state: 'newline in basic string'
+      c == C(92):
+        after =: skip-horizontal(advance(state))
+        if multiline? && (peek-char(after) == newline):
+          then:
+            state =: state:advance:skip-horizontal:advance
+            state =:
+              loop state state:
+                c =: peek-char(state)
+                if horizontal-space?(c) || (c == newline):
+                  recur: advance(state)
+                  else: state
+            recur: state out
+          else:
+            value state =: read-basic-escape(advance(state))
+            recur: state, into(out value)
+      ? control-char?(c) &&
+        (multiline? && (c == newline)).! &&
+        (c != tab)
+      : parser-error state: 'control character in basic string'
+      else:
+        recur: advance(state), out.conj(c)
+
+defn- read-literal-string(state multiline?):
+  width =: if(multiline? 3 1)
+  state =: advance-n(state width)
+  state :if multiline? =: trim-first-newline(state)
+  loop state state, out []:
+    c =: peek-char(state)
+    cond:
+      nil?(c):
+        parser-error state: 'unterminated literal string'
+      multiline? && (c == C("'")):
+        run =: quote-run(state C("'"))
+        cond:
+          run < 3:
+            recur: advance-n(state run), into(out repeat(run C("'")))
+          run <= 5:
+            value =: into(out repeat((run - 3) C("'"))):join
+            vector: value advance-n(state run)
+          else:
+            parser-error state: 'too many quotes at string end'
+      multiline?.! && (c == C("'")):
+        vector: out:join advance(state)
+      multiline?.! && (c == newline):
+        parser-error state: 'newline in literal string'
+      ? control-char?(c) &&
+        (multiline? && (c == newline)).! &&
+        (c != tab)
+      : parser-error state: 'control character in literal string'
+      else:
+        recur: advance(state), out.conj(c)
+
+defn- bare-key-char?(c):
+  c &&:
+    (int(C("a")) <= int(c) <= int(C('z'))) ||
+    (int(C("A")) <= int(c) <= int(C('Z'))) ||
+    (int(C("0")) <= int(c) <= int(C("9"))) ||
+    (c == C("_")) || (c == C("-"))
+
+defn- read-bare-key(state):
+  loop state state, out []:
+    c =: peek-char(state)
+    if bare-key-char?(c):
+      recur: advance(state), out.conj(c)
+      if out:seq:
+        vector: out:join state
+        parser-error state: 'expected key'
+
+defn- read-key(state):
+  cond:
+    starts-with?(state '"""'):
+      parser-error state: 'multiline string cannot be a key'
+    peek-char(state) == C('"'):
+      read-basic-string: state false
+    starts-with?(state "'''"):
+      parser-error state: 'multiline string cannot be a key'
+    peek-char(state) == C("'"):
+      read-literal-string: state false
+    else:
+      read-bare-key: state
+
+defn- read-key-path(state):
+  loop state skip-horizontal(state), path []:
+    key state =: read-key(state)
+    state =: skip-horizontal(state)
+    path =: path.conj(key)
+    if peek-char(state) == C('.'):
+      recur: skip-horizontal(advance(state)), path
+      vector: path state
+
+defn- decimal-mul-add(digits base addend):
+  loop input digits:reverse, carry addend, output []:
+    digit =: input:first
+    if digit:
+      then:
+        value =: (digit * base) + carry
+        recur:
+          input:rest
+          (value // 10)
+          output.conj(value % 10)
+      else:
+        output =:
+          loop output output, carry carry:
+            if carry:pos?:
+              recur: output.conj(carry % 10), (carry // 10)
+              else: output
+        output: .reverse():V
+
+defn- base-digit(c):
+  hex-value(c) || -1
+
+defn- base-to-decimal(text base):
+  digits =: remove(\(_ == C('_')) text)
+  loop chars digits, result [0]:
+    c =: chars:first
+    if c:
+      then:
+        digit =: base-digit(c)
+        when (digit < 0) || (digit >= base):
+          throw: ex-info('invalid integer digit' {})
+        recur: chars:rest decimal-mul-add(result base digit)
+      else:
+        chars =: result.map(\(C(int(C('0')) + _)))
+        =>: chars:join
+
+defn- strip-leading-zeroes(text):
+  stripped =: text.drop-while(\(_ == C('0'))):join
+  if stripped == '': +'0' stripped
+
+defn- decimal-in-range?(negative? digits):
+  limit =: if(negative? '9223372036854775808' '9223372036854775807')
+  digits =: strip-leading-zeroes(digits)
+  (digits.# < limit.#) ||:
+    (digits.# == limit.#) && compare(digits limit):pos?.!
+
+defn- normalize-integer(token state):
+  negative? =: token.starts?('-')
+  positive? =: token.starts?('+')
+  signed? =: negative? || positive?
+  unsigned =: if(signed? token.subs(1) token)
+  base digits =:
+    cond:
+      unsigned.starts?('0x'): :[16 unsigned.subs(2)]
+      unsigned.starts?('0o'): :[8 unsigned.subs(2)]
+      unsigned.starts?('0b'): :[2 unsigned.subs(2)]
+      else: :[10 unsigned]
+  pattern =:
+    case base:
+      16: /[0-9A-Fa-f]+(?:_[0-9A-Fa-f]+)*/
+      8: /[0-7]+(?:_[0-7]+)*/
+      2: /[01]+(?:_[01]+)*/
+      else: /(?:0|[1-9][0-9]*(?:_[0-9]+)*)/
+  when-not digits.re-matches(pattern):
+    parser-error state: 'invalid integer'
+  when (base != 10) && (negative? || positive?):
+    parser-error state: 'base-prefixed integer cannot have a sign'
+  decimal =:
+    if base == 10:
+      then: digits.replace('_' '')
+      else: base-to-decimal(digits base)
+  when-not decimal-in-range?(negative? decimal):
+    parser-error state: 'integer outside signed 64-bit range'
+  decimal =: strip-leading-zeroes(decimal)
+  prefix =: if((negative? && (decimal != '0')) '-' '')
+  prefix +: decimal
+
+defn- leap-year?(year):
+  (year % 400).! ||:
+    (year % 4).! && (year % 100).?
+
+defn- valid-date?(year month day):
+  days =:
+    case month:
+      1: 31
+      3: 31
+      5: 31
+      7: 31
+      8: 31
+      10: 31
+      12: 31
+      4: 30
+      6: 30
+      9: 30
+      11: 30
+      2: if(leap-year?(year) 29 28)
+      else: 0
+  le: 1 day days
+
+defn- parse-small-int(text):
+  I: strip-leading-zeroes(text)
+
+date-pattern =: /([0-9]{4})-([0-9]{2})-([0-9]{2})/
+
+time-pattern-text =: '([0-9]{2}):([0-9]{2})'
+time-pattern-text +=: '(?::([0-9]{2})(\.[0-9]+)?)?'
+time-pattern =: re-pattern(time-pattern-text)
+
+datetime-pattern-text =: '([0-9]{4})-([0-9]{2})-([0-9]{2})[Tt ]'
+datetime-pattern-text +=: '([0-9]{2}):([0-9]{2})'
+datetime-pattern-text +=: '(?::([0-9]{2})(\.[0-9]+)?)?'
+datetime-pattern-text +=: '(Z|z|[+-][0-9]{2}:[0-9]{2})?'
+datetime-pattern =: re-pattern(datetime-pattern-text)
+
+defn- normalize-temporal(token state):
+  missing =: nil
+  datetime-match =: token.re-matches(datetime-pattern)
+  if datetime-match:
+    then:
+      _ y m d h minute second fraction offset =: datetime-match
+      year =: parse-small-int(y)
+      month =: parse-small-int(m)
+      day =: parse-small-int(d)
+      hour =: parse-small-int(h)
+      minute-number =: parse-small-int(minute)
+      second-number =: parse-small-int(second || '00')
+      valid? =:
+        valid-date?(year month day) &&
+        (0 <= hour <= 23) &&
+        (0 <= minute-number <= 59) &&
+        (0 <= second-number <= 59)
+      when-not valid?:
+        parser-error state: 'invalid date or time'
+      when offset && offset.in?(\{'Z' 'z'}).!:
+        _ oh om =: offset.re-matches(/[+-]([0-9]{2}):([0-9]{2})/)
+        valid? =:
+          (0 <= parse-small-int(oh) <= 23) &&
+          (0 <= parse-small-int(om) <= 59)
+        when-not valid?:
+          parser-error state: 'invalid date-time offset'
+      second =: second || '00'
+      offset =: when(offset offset.eq('z').if('Z' offset))
+      value =: str(y '-' m '-' d 'T' h ':' minute ':')
+      value +=: str(second fraction offset)
+      type =: if(offset 'datetime' 'datetime-local')
+      =>: :{:value value :type type}
+    else:
+      date-match =: token.re-matches(date-pattern)
+      if date-match:
+        then:
+          _ y m d =: date-match
+          valid? =:
+            valid-date?:
+              parse-small-int(y)
+              parse-small-int(m)
+              parse-small-int(d)
+          when-not valid?:
+            parser-error state: 'invalid date'
+          =>: :{:value token :type 'date-local'}
+        else:
+          time-match =: token.re-matches(time-pattern)
+          if time-match:
+            then:
+              _ h minute second fraction =: time-match
+              second =: second || '00'
+              valid? =:
+                (0 <= parse-small-int(h) <= 23) &&
+                (0 <= parse-small-int(minute) <= 59) &&
+                (0 <= parse-small-int(second) <= 59)
+              when-not valid?:
+                parser-error state: 'invalid time'
+              value =: "$h:$minute:$second$fraction"
+              =>: :{:value value :type 'time-local'}
+            else: missing
+
+float-pattern-text =: '[+-]?(?:'
+float-pattern-text +=: '(?:0|[1-9][0-9]*(?:_[0-9]+)*)'
+float-pattern-text +=: '\.[0-9]+(?:_[0-9]+)*'
+float-pattern-text +=: '(?:[eE][+-]?[0-9]+(?:_[0-9]+)*)?'
+float-pattern-text +=: '|'
+float-pattern-text +=: '(?:0|[1-9][0-9]*(?:_[0-9]+)*)'
+float-pattern-text +=: '[eE][+-]?[0-9]+(?:_[0-9]+)*'
+float-pattern-text +=: ')'
+float-pattern =: re-pattern(float-pattern-text)
+
+defn scalar-node:
+  (value): scalar-node(value nil nil)
+  (value style): scalar-node(value style nil)
+  (value style toml-type):
+    =>: :{:node :scalar
+          :value value
+          :style style
+          :toml-type toml-type}
+
+defn- read-token(state):
+  loop state state, out []:
+    c =: peek-char(state)
+    done? =:
+      nil?(c) || (c == newline) || (c == C('#')) ||
+      (c == C(',')) || (c == C(']')) || (c == C('}'))
+    if done?:
+      vector: out:join:trimr state
+      recur: advance(state), out.conj(c)
+
+defn- parse-token(token state):
+  temporal =: normalize-temporal(token state)
+  integer? =:
+    token.re-matches(/[+-]?(?:0|[1-9][0-9_]*|0[xob].+)/) ||
+    token.re-matches(/0[xob].+/)
+  cond:
+    token == 'true': scalar-node('true' nil 'bool')
+    token == 'false': scalar-node('false' nil 'bool')
+    token.in?(\{'inf' '+inf' '-inf'}):
+      value =: if((token == '-inf') '-.inf' '.inf')
+      scalar-node: value nil 'float'
+    token.in?(\{'nan' '+nan' '-nan'}):
+      scalar-node('.nan' nil 'float')
+    temporal:
+      scalar-node: temporal.value 'double' temporal.type
+    token.re-matches(float-pattern):
+      scalar-node: token.replace('_' '') nil 'float'
+    integer?:
+        scalar-node: normalize-integer(token state) nil 'integer'
+    else:
+      parser-error state: "invalid value $(pr-str(token))"
+
+defn map-node:
+  (origin): map-node(origin nil nil)
+  (origin head line):
+    =>: :{:node :map
+          :origin origin
+          :entries []
+          :index {}
+          :head head
+          :line line}
+
+defn- seq-node(items):
+  =>: :{:node :seq :items items:V}
+
+defn- entry-at(table key):
+  when-some index table.index.$key:
+    table.entries.$index
+
+defn- replace-entry(table key entry):
+  table.assoc-in([:entries table.index.$key] entry)
+
+defn- add-entry(table entry state):
+  key =: entry.key
+  when contains?(table.index key):
+    parser-error state: "duplicate key $(pr-str(key))"
+  table: .assoc-in([:index key] table.entries.#)
+    .update(:entries \(_.conj(entry)))
+
+defn- aot-node?(node):
+  (node.node == :seq) && node.aot
+
+defn- alter-current-aot(node f):
+  index =: node.items.#.--
+  node: .assoc-in([:items index] f(node.items.$index))
+
+defn- insert-relative(table path value head line state):
+  when table.sealed:
+    parser-error state: 'cannot extend an inline table'
+  key =: path:first
+  if path.# == 1:
+    then:
+      entry =: :{:key key :value value.put(:line line) :head head}
+      add-entry: table entry state
+    else:
+      entry =: entry-at(table key)
+      if entry:
+        then:
+          child =: entry.value
+          child =:
+            cond:
+              (child.node == :map) && (child.origin != :header):
+                insert-relative: child path:rest value head line state
+              aot-node?(child):
+                parser-error state:
+                  'dotted key cannot extend an array of tables'
+              child.node == :map:
+                parser-error state:
+                  'dotted key cannot extend a defined table'
+              else:
+                parser-error state: 'key path crosses a scalar value'
+          replace-entry: table key entry.put(:value child)
+        else:
+          child =:
+            insert-relative: map-node(:dotted) path:rest value head line state
+          entry =: :{:key key :value child}
+          add-entry: table entry state
+
+defn- alter-table-at(table path f state):
+  if path:empty?:
+    then: f(table)
+    else:
+      key =: path:first
+      entry =: entry-at(table key)
+      when-not entry:
+        parser-error state: 'internal table path is missing'
+      child =: entry.value
+      child =:
+        cond:
+          child.node == :map:
+            alter-table-at: child path:rest f state
+          aot-node?(child):
+            alter-current-aot child:
+              \(alter-table-at(_ path:rest f state))
+          else:
+            parser-error state: 'table path crosses a scalar value'
+      replace-entry: table key entry.put(:value child)
+
+defn- declare-table-path(table path head line state):
+  when table.sealed:
+    parser-error state: 'cannot extend an inline table'
+  key =: path:first
+  final? =: path.# == 1
+  entry =: entry-at(table key)
+  if entry:
+    then:
+      child =: entry.value
+      cond:
+        aot-node?(child):
+          if final?:
+            then:
+              parser-error state:
+                'array of tables cannot be redefined as a table'
+            else:
+              child =:
+                alter-current-aot child:
+                  \(declare-table-path(_ path:rest head line state))
+              replace-entry: table key entry.put(:value child)
+        child.node != :map:
+          parser-error state: 'table conflicts with an existing value'
+        final?:
+          if child.origin == :implicit:
+            then:
+              child =: child.put(:origin :header :head head :line line)
+              replace-entry: table key entry.put(:value child)
+            else:
+              parser-error state: 'table is already defined'
+        else:
+          child =: declare-table-path(child path:rest head line state)
+          replace-entry: table key entry.put(:value child)
+    else:
+      if final?:
+        then:
+          entry =: :{:key key :value map-node(:header head line)}
+          add-entry: table entry state
+        else:
+          child =:
+            declare-table-path:
+              map-node(:implicit)
+              path:rest
+              head
+              line
+              state
+          entry =: :{:key key :value child}
+          add-entry: table entry state
+
+defn- declare-aot-path(table path head line state):
+  when table.sealed:
+    parser-error state: 'cannot extend an inline table'
+  key =: path:first
+  final? =: path.# == 1
+  entry =: entry-at(table key)
+  if entry:
+    then:
+      child =: entry.value
+      cond:
+        final? && aot-node?(child):
+          item =: map-node(:aot-item head line)
+          child =: child.update(:items \(_.conj(item)))
+          replace-entry: table key entry.put(:value child)
+        final?:
+          parser-error state:
+            'array of tables conflicts with existing value'
+        aot-node?(child):
+          child =:
+            alter-current-aot child:
+              \(declare-aot-path(_ path:rest head line state))
+          replace-entry: table key entry.put(:value child)
+        child.node == :map:
+          child =: declare-aot-path(child path:rest head line state)
+          replace-entry: table key entry.put(:value child)
+        else:
+          parser-error state: 'array of tables path crosses a value'
+    else:
+      if final?:
+        then:
+          child =: seq-node([map-node(:aot-item head line)]).put(:aot true)
+          entry =: :{:key key :value child}
+          add-entry: table entry state
+        else:
+          child =:
+            declare-aot-path:
+              map-node(:implicit)
+              path:rest
+              head
+              line
+              state
+          entry =: :{:key key :value child}
+          add-entry: table entry state
+
+defn- seal-node(node):
+  case node.node:
+    :map:
+      node.put(:sealed true)
+        .update(:entries \(_.mapv(\(_.update(:value seal-node)))))
+    :seq: node.update(:items \(_.mapv(seal-node)))
+    else: node
+
+defn- skip-collection-trivia(state):
+  loop state state, comments []:
+    state =:
+      loop state state:
+        c =: peek-char(state)
+        if horizontal-space?(c) || (c == newline):
+          recur: advance(state)
+          else: state
+    if peek-char(state) == C('#'):
+      then:
+        comment state =: read-comment(state)
+        recur: state comments.conj(comment)
+      else:
+        vector: state comments
+
+defn- add-node-head(node comments):
+  head =: join-comments(comments)
+  if head:
+    then:
+      node.update(:head \(if(_ str(_ newline:S head) head)))
+    else: node
+
+defn- read-array(state depth):
+  when depth > max-depth:
+    parser-error state: 'maximum nesting depth exceeded'
+  loop state advance(state), items []:
+    state comments =: skip-collection-trivia(state)
+    if peek-char(state) == C(']'):
+      then:
+        vector: seq-node(items) advance(state)
+      else:
+        item state =: read-value(state depth.++)
+        item =: add-node-head(item comments)
+        state =: skip-horizontal(state)
+        item state =:
+          if peek-char(state) == C('#'):
+            then:
+              comment state =: read-comment(state)
+              vector: item.put(:line comment) state
+            else:
+              vector: item state
+        closing-state trailing-comments =: skip-collection-trivia(state)
+        cond:
+          peek-char(closing-state) == C(']'):
+            result =: seq-node(items.conj(item))
+            result =:
+              if trailing-comments:seq:
+                then: result.put(:foot join-comments(trailing-comments))
+                else: result
+            vector: result advance(closing-state)
+          peek-char(closing-state) == C(','):
+            state =: skip-horizontal(advance(closing-state))
+            item state =:
+              if peek-char(state) == C('#'):
+                then:
+                  comment state =: read-comment(state)
+                  vector: item.put(:line comment) state
+                else:
+                  vector: item state
+            recur: state items.conj(item)
+          else:
+            parser-error state: 'expected comma or closing bracket'
+
+defn- read-inline-table(state depth):
+  when depth > max-depth:
+    parser-error state: 'maximum nesting depth exceeded'
+  loop state advance(state), table map-node(:inline):
+    state comments =: skip-collection-trivia(state)
+    if peek-char(state) == C('}'):
+      then:
+        vector: seal-node(table) advance(state)
+      else:
+        path state =: read-key-path(state)
+        state =: skip-horizontal(state)
+        state =: expect-char(state C('='))
+        value state =: read-value(skip-horizontal(state) depth.++)
+        head =: join-comments(comments)
+        table =: insert-relative(table path value head nil state)
+        state =: skip-horizontal(state)
+        state _ =: skip-collection-trivia(state)
+        cond:
+          peek-char(state) == C('}'):
+            vector: seal-node(table) advance(state)
+          peek-char(state) == C(','):
+            recur: advance(state) table
+          else:
+            parser-error state: 'expected comma or closing brace'
+
+defn- read-value(state depth):
+  cond:
+    starts-with?(state '"""'):
+      value state =: read-basic-string(state true)
+      vector: scalar-node(value 'double' 'string') state
+    peek-char(state) == C('"'):
+      value state =: read-basic-string(state false)
+      vector: scalar-node(value 'double' 'string') state
+    starts-with?(state "'''"):
+      value state =: read-literal-string(state true)
+      vector: scalar-node(value 'double' 'string') state
+    peek-char(state) == C("'"):
+      value state =: read-literal-string(state false)
+      vector: scalar-node(value 'double' 'string') state
+    peek-char(state) == C('['): read-array(state depth)
+    peek-char(state) == C('{'): read-inline-table(state depth)
+    else:
+      token state-after =: read-token(state)
+      when token == '':
+        parser-error state: 'expected value'
+      vector: parse-token(token state) state-after
+
+defn- consume-statement-end(state):
+  state =: skip-horizontal(state)
+  line state =:
+    if peek-char(state) == C('#'):
+      then: read-comment(state)
+      else: :[nil state]
+  state =: skip-horizontal(state)
+  cond:
+    peek-char(state) == newline: :[line advance(state)]
+    nil?(peek-char(state)): :[line state]
+    else: parser-error(state 'expected end of line')
+
+defn- read-header(state array?):
+  width =: if(array? 2 1)
+  state =: advance-n(state width)
+  path state =: read-key-path(state)
+  state =: skip-horizontal(state)
+  close =: if(array? ']]' ']')
+  when-not starts-with?(state close):
+    parser-error state: 'unterminated table header'
+  vector: path advance-n(state width)
+
+defn- collect-document-trivia(state):
+  loop state state, comments []:
+    state =: skip-horizontal(state)
+    c =: peek-char(state)
+    cond:
+      c == C('#'):
+        comment state =: read-comment(state)
+        comments =: comments.conj(comment)
+        if peek-char(state) == newline:
+          recur: advance(state), comments
+          else: :[state comments]
+      c == newline:
+        recur: advance(state) comments
+      else:
+        vector: state comments
+
+defn- parse-document(text):
+  loop state initial-state(text), root map-node(:root), current [], seen false:
+    state comments =: collect-document-trivia(state)
+    if-not peek-char(state):
+      then:
+        if comments:seq:
+          if seen:
+            then: root.put(:foot join-comments(comments))
+            else: root.put(:head join-comments(comments))
+          else: root
+      else:
+        root =:
+          if comments:seq && seen.!:
+            then: root.put(:head join-comments(comments))
+            else: root
+        head =: when(seen join-comments(comments))
+        cond:
+          starts-with?(state '[['):
+            mark =: state
+            path state =: read-header(state true)
+            line state =: consume-statement-end(state)
+            root =: declare-aot-path(root path head line mark)
+            recur: state, root, path, true
+          peek-char(state) == C('['):
+            mark =: state
+            path state =: read-header(state false)
+            line state =: consume-statement-end(state)
+            root =: declare-table-path(root path head line mark)
+            recur: state, root, path, true
+          else:
+            mark =: state
+            path state =: read-key-path(state)
+            state =: skip-horizontal(state)
+            state =: expect-char(state C('='))
+            value state =: read-value(skip-horizontal(state) 0)
+            line state =: consume-statement-end(state)
+            insert =: \(insert-relative(_ path value head line mark))
+            root =: alter-table-at(root current insert mark)
+            recur: state, root, current, true
+
+defn- comment-fields(node):
+  fields =: :{}
+  fields =: if(node.head fields.put(:head node.head) fields)
+  fields =: if(node.line fields.put(:line node.line) fields)
+  fields =: if(node.foot fields.put(:foot node.foot) fields)
+  =>: fields
+
+defn- scalar-tag(toml-type):
+  case toml-type:
+    'bool': +'!!bool'
+    'integer': +'!!int'
+    'float': +'!!float'
+    else: +'!!str'
+
+defn- event-map(type):
+  =>: :{:event type}
+
+declare: node-events
+
+defn- entry-events(entry):
+  key-event =: :{}
+  key-event =: key-event.put(:event 'scalar')
+  key-event =: key-event.put(:style 'double')
+  key-event =: key-event.put(:tag scalar-tag('string'))
+  key-event =: key-event.put(:value entry.key)
+  key-event =: if(entry.head key-event.put(:head entry.head) key-event)
+  key-event =: if(entry.foot key-event.put(:foot entry.foot) key-event)
+  value-events =: node-events(entry.value)
+  base =: :[key-event]
+  into: base value-events
+
+defn- node-events(node):
+  case node.node:
+    :scalar:
+      event =: :{:event 'scalar' :value node.value}
+      event =: event.put(:tag scalar-tag(node.toml-type))
+      event =: if(node.style event.put(:style node.style) event)
+      event =:
+        if(node.toml-type event.put(:toml-type node.toml-type) event)
+      vector: merge(event comment-fields(node))
+    :map:
+      start =: merge(event-map('mapping_start') comment-fields(node))
+      events =: node.entries.mapcat(entry-events)
+      events =: concat(events [event-map('mapping_end')])
+      base =: :[start]
+      into: base events
+    :seq:
+      start =: merge(event-map('sequence_start') comment-fields(node))
+      events =: node.items.mapcat(node-events)
+      events =: concat(events [event-map('sequence_end')])
+      base =: :[start]
+      into: base events
+
+defn parse:
+  (text): parse(text hash-map())
+  (text config):
+    when config:seq:
+      data =: :{:config config}
+      throw:
+        ex-info('TOML parser configuration must be empty' data)
+    prefix =: :[event-map('stream_start') event-map('document_start')]
+    body =: node-events(parse-document(text || ''))
+    suffix =: :[event-map('document_end') event-map('stream_end')]
+    events =: concat(prefix body suffix)
+    =>: events:V

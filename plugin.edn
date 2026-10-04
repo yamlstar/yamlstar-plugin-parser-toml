@@ -1,0 +1,6 @@
+{:abi 2
+ :api "parser"
+ :kind "event-source"
+ :name "toml"
+ :version "0.1.0"
+ :event-format "yamlstar-events-edn-v1"}

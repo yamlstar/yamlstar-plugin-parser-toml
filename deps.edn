@@ -1,0 +1,11 @@
+{:paths ["src" "generated/clj"]
+ :mvn/local-repo ".cache/m2"
+ :deps
+ {org.yamlscript/ys.v0 {:mvn/version "0.3.4"}}
+ :aliases
+ {:test
+  {:extra-paths ["test"]
+   :main-opts ["-m" "toml-parser.test-runner"]}
+  :yamlstar-test
+  {:extra-paths ["test" "../../core/src"]
+   :main-opts ["-m" "toml-parser.yamlstar-test-runner"]}}}

@@ -1,0 +1,51 @@
+name: Test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Test ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - platform: linux-x64
+          runner: ubuntu-22.04
+        - platform: linux-aarch64
+          runner: ubuntu-22.04-arm
+        - platform: macos-x64
+          runner: macos-15-intel
+        - platform: macos-arm64
+          runner: macos-15
+    steps:
+    - name: Check out plugin
+      uses: actions/checkout@v5
+
+    - name: Install archive dependencies
+      if: startsWith(matrix.platform, 'macos-')
+      run: |
+        brew list gnu-tar >/dev/null 2>&1 || brew install gnu-tar
+        brew list xz >/dev/null 2>&1 || brew install xz
+
+    - name: Test parser and shared library
+      run: make test test-conformance
+
+    - name: Check generated sources
+      run: make generate-check
+
+    - name: Test release archive
+      run: |
+        make release-archive \
+          RELEASE-PLATFORM="${{ matrix.platform }}" \
+          TAR="${{ startsWith(matrix.platform, 'macos-') && 'gtar' || 'tar' }}"
