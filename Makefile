@@ -13,6 +13,13 @@ include $(MAKES)/perl.mk
 include $(MAKES)/shellcheck.mk
 YAMLSCRIPT-VERSION := 0.3.4
 include $(MAKES)/yamlscript.mk
+# Correct uv-managed CPython names until Makes provides these mappings.
+CPYTHON-OA-linux-arm64 := linux-aarch64-gnu
+CPYTHON-OA-macos-int64 := macos-x86_64-none
+ifneq ($(CPYTHON-OA-$(OS-ARCH)),)
+override PYTHON-NAME = cpython-$(PYTHON-VERSION)-$(CPYTHON-OA-$(OS-ARCH))
+endif
+include $(MAKES)/python.mk
 include $(MAKES)/clean.mk
 
 SHELL-NAME := makes yamlstar-plugin-parser-toml
@@ -34,8 +41,8 @@ TOML-TEST-DECODER := .cache/bin/toml-test-decoder
 SO ?= $(if $(filter macos,$(OS-NAME)),dylib,so)
 SHARED-LIB := lib/libyamlstar-plugin-parser-toml.$(SO)
 LIB-NAME := libyamlstar-plugin-parser-toml.$(SO)
-RELEASE-ARCH := $(if $(IS-INTEL),x64,\
-  $(if $(IS-LINUX),aarch64,arm64))
+RELEASE-ARCH := $(strip $(if $(IS-INTEL),x64,\
+  $(if $(IS-LINUX),aarch64,arm64)))
 RELEASE-PLATFORM ?= $(OS-NAME)-$(RELEASE-ARCH)
 RELEASE-NAME := $(PLUGIN)-$(VERSION)-$(RELEASE-PLATFORM)
 RELEASE-DIR := dist/$(RELEASE-NAME)
@@ -71,13 +78,27 @@ $(GLOAT-LINK): $(GENERATED-CLJ)
 $(CLJ-CONFIG):
 	mkdir -p $@
 
-test: $(CLOJURE) $(GO) $(CLJ-CONFIG) generate $(SHARED-LIB) $(SHELLCHECK)
+test: $(CLOJURE) $(GO) $(CLJ-CONFIG) generate $(SHARED-LIB) $(SHELLCHECK) $(PERL)
 	CLJ_CONFIG=$(CLJ-CONFIG) $(CLOJURE) -M:test
 	env -u GOROOT CGO_ENABLED=0 $(GO) test ./...
 	env -u GOROOT CGO_ENABLED=1 $(GO) test ./shared
 	$(call compile-abi-test,.cache/abi-test)
 	YAMLSTAR_LIBRARY_PATH=$(abspath lib) .cache/abi-test
-	$(SHELLCHECK) util/release util/test-archive
+	$(SHELLCHECK) util/release util/test-archive util/test-release util/test-goyaml-cli
+	PERL=$(PERL) util/test-release
+
+test-goyaml: $(GO)
+	env -u GOROOT CGO_ENABLED=0 $(GO) test ./goyaml
+
+test-race: $(GO)
+	env -u GOROOT CGO_ENABLED=1 $(GO) test -race ./parser ./goyaml
+
+test-goyaml-cli: $(GO) $(PERL) $(PYTHON)
+	GO=$(GO) PERL=$(PERL) PYTHON=$(PYTHON) util/test-goyaml-cli
+
+test-release: $(PERL) $(SHELLCHECK)
+	$(SHELLCHECK) util/release util/test-release
+	PERL=$(PERL) util/test-release
 
 test-yamlstar: $(CLOJURE) $(CLJ-CONFIG)
 	CLJ_CONFIG=$(CLJ-CONFIG) $(CLOJURE) -M:yamlstar-test
@@ -95,6 +116,8 @@ $(RELEASE-LIB): generate $(GO)
 	  -ldflags='-s -w' -buildmode=c-shared -o $@ ./shared
 
 release-check: $(PERL)
+	grep -Fxq 'const Version = "$(VERSION)"' parser/parser.go
+	grep -Fxq '#define PLUGIN_VERSION "$(VERSION)"' test/abi.c
 	version=$$($(PERL) -ne \
 	  'print "$$1\n" if /^version:\s*(\S+)/' Meta); \
 	  test "$$version" = "$(VERSION)"

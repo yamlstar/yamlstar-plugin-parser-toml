@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+release=$PWD/util/release
+perl=${PERL:?PERL must name the project-managed Perl}
+[[ $perl == /* ]] || perl=$PWD/$perl
+export PERL=$perl
+temporary=$(mktemp -d)
+trap 'rm -rf "$temporary"' EXIT
+mkdir -p "$temporary/test" "$temporary/parser"
+cp Makefile Meta plugin.edn "$temporary/"
+cp test/abi.c "$temporary/test/"
+cp parser/parser.go "$temporary/parser/"
+
+# All tag and version mutations below are confined to a disposable repository.
+cd "$temporary"
+git init -q -b main
+git config user.name 'Release Tests'
+git config user.email release-tests@example.invalid
+git add .
+git commit -qm 'Create release test fixture' \
+  -m 'Create isolated version metadata for release helper checks.'
+# The dollar sign below names a Perl capture, not a shell variable.
+# shellcheck disable=SC2016
+version=$("$perl" -ne 'print "$1" if /:version "([^"]+)"/' plugin.edn)
+bash "$release" sanity-check "$version" 9.8.7
+YS_RELEASE_DRYRUN=1 bash "$release" release "$version" 9.8.7 > preview
+grep -Fq 'Would bump version' preview
+git diff --exit-code -- Makefile Meta plugin.edn test/abi.c parser/parser.go
+bash "$release" version-bump "$version" 9.8.7
+grep -Fq 'const Version = "9.8.7"' parser/parser.go
+YS_RELEASE_DRYRUN=1 bash "$release" tag 9.8.7 > preview
+grep -Fq 'Would create tag 9.8.7' preview
+grep -Fq 'Would create tag v9.8.7' preview
+if git rev-parse --verify refs/tags/9.8.7 >/dev/null 2>&1; then
+  echo 'Release dry run created a tag' >&2
+  exit 1
+fi
+bash "$release" tag 9.8.7
+bash "$release" tag 9.8.7
+[[ $(git rev-parse '9.8.7^{commit}') == \
+   $(git rev-parse 'v9.8.7^{commit}') ]]
+
+git add Makefile Meta plugin.edn test/abi.c parser/parser.go
+git commit -qm 'Update release test versions' \
+  -m 'Provide a second commit for conflicting tag checks.'
+printf '#!/usr/bin/env bash\nprintf "0\\n"\n' > gh-fixture
+chmod +x gh-fixture
+if GH=$temporary/gh-fixture YS_RELEASE_DRYRUN=1 \
+  bash "$release" retry 9.8.7 > retry.log 2>&1; then
+  echo 'Release retry accepted moving published module tags' >&2
+  exit 1
+fi
+grep -Fq 'Go module tags are immutable' retry.log
+[[ $(git rev-parse '9.8.7^{commit}') == $(git rev-parse HEAD~1) ]]
+[[ $(git rev-parse 'v9.8.7^{commit}') == $(git rev-parse HEAD~1) ]]
+
+bash "$release" version-bump 9.8.7 9.8.8
+git tag v9.8.8 HEAD~1
+if bash "$release" tag 9.8.8 > conflict 2>&1; then
+  echo 'Release helper accepted a conflicting Go tag' >&2
+  exit 1
+fi
+grep -Fq 'Tag v9.8.8 already exists away from HEAD' conflict
+if git rev-parse --verify refs/tags/9.8.8 >/dev/null 2>&1; then
+  echo 'Conflicting Go tag left a new native tag behind' >&2
+  exit 1
+fi
+git tag -d v9.8.8 >/dev/null
+git tag 9.8.8 HEAD~1
+if bash "$release" tag 9.8.8 > conflict 2>&1; then
+  echo 'Release helper accepted a conflicting native tag' >&2
+  exit 1
+fi
+if git rev-parse --verify refs/tags/v9.8.8 >/dev/null 2>&1; then
+  echo 'Conflicting native tag left a new Go tag behind' >&2
+  exit 1
+fi
+
+"$perl" -pi -e 's/const Version = "9.8.8"/const Version = "0.0.0"/' \
+  parser/parser.go
+if YS_RELEASE_DRYRUN=1 bash "$release" sanity-check 9.8.8 9.8.9 \
+  > mismatch 2>&1; then
+  echo 'Release helper accepted mismatched parser metadata' >&2
+  exit 1
+fi
+grep -Fq 'Parser version 0.0.0 does not match plugin.edn 9.8.8' mismatch
+echo 'Release helper tests passed'

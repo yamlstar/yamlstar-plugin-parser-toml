@@ -1,0 +1,55 @@
+- name: Demo input
+  toml: |
+    answer = 42
+    [server]
+    host = "localhost"
+  want: |
+    answer: 42
+    server: {host: localhost}
+
+- name: Scalar types and arrays
+  toml: |
+    bool = true
+    int = 0x2a
+    float = 1.25
+    string = '42'
+    array = [1, 'two', false]
+  want: |
+    bool: true
+    int: 42
+    float: 1.25
+    string: '42'
+    array: [1, two, false]
+
+- name: Tables and arrays of tables
+  toml: |
+    [server.tls]
+    enabled = true
+    [[people]]
+    name = 'Ada'
+    [[people]]
+    name = 'Grace'
+  want: |
+    server: {tls: {enabled: true}}
+    people: [{name: Ada}, {name: Grace}]
+
+- name: Date and time remain strings
+  toml: |
+    date = 2026-10-23
+    time = 12:34:56
+    datetime = 2026-10-23T12:34:56Z
+  want: |
+    date: '2026-10-23'
+    time: '12:34:56'
+    datetime: '2026-10-23T12:34:56Z'
+
+- name: Duplicate keys
+  toml: |
+    answer = 1
+    answer = 2
+  error: duplicate key
+
+- name: Invalid date
+  toml: |
+    date = 2025-02-29
+  error: invalid date

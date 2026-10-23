@@ -39,7 +39,19 @@ jobs:
         brew list xz >/dev/null 2>&1 || brew install xz
 
     - name: Test parser and shared library
-      run: make test test-conformance
+      run: make test test-conformance test-race
+
+    - name: Check out go-yaml host
+      uses: actions/checkout@v5
+      with:
+        repository: yaml/go-yaml
+        ref: 32734c39dedb70116a90a5d59e26580a3e7bf71f
+        path: repos/go-yaml
+
+    - name: Test generic go-yaml CLI build
+      env:
+        GO_YAML_DIR: repos/go-yaml
+      run: make test-goyaml-cli
 
     - name: Check generated sources
       run: make generate-check

@@ -42,6 +42,18 @@ jobs:
         grep -Fq "version: $VERSION" Meta
         grep -Fq ":version \"$VERSION\"" plugin.edn
 
+    - name: Check out go-yaml host
+      uses: actions/checkout@v5
+      with:
+        repository: yaml/go-yaml
+        ref: 32734c39dedb70116a90a5d59e26580a3e7bf71f
+        path: repos/go-yaml
+
+    - name: Verify adapter and release helpers
+      env:
+        GO_YAML_DIR: repos/go-yaml
+      run: make release-check test-goyaml test-goyaml-cli test-release
+
   build:
     name: Build ${{ matrix.platform }}
     needs: verify

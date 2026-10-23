@@ -1,0 +1,65 @@
+- name: Native defaults after linking
+  input: |
+    answer: 42
+  flags: [-j]
+  want: |
+    {"answer":42}
+
+- name: TOML selected by flag
+  input: |
+    answer = 42
+    [server]
+    host = 'localhost'
+  flags: [--plugin=yaml-parser=toml, -j]
+  want: |
+    {"answer":42,"server":{"host":"localhost"}}
+
+- name: TOML selected by configuration
+  input: |
+    answer = 42
+  flags: [-j]
+  config: |
+    plugin:
+      yaml-parser: toml
+  want: |
+    {"answer":42}
+
+- name: Runtime selection overrides configuration
+  input: |
+    answer = 42
+  flags: [--plugin=yaml-parser=toml, -j]
+  config: |
+    plugin:
+      yaml-parser: go-yaml
+  want: |
+    {"answer":42}
+
+- name: Invalid TOML is rejected
+  input: |
+    answer = 1
+    answer = 2
+  flags: [--plugin=yaml-parser=toml, -j]
+  error: duplicate key
+
+- name: Requested version must match
+  input: |
+    answer = 42
+  flags: [--plugin=yaml-parser=toml@v9.8.7, -j]
+  error: version mismatch
+
+- name: Unknown options are rejected
+  input: |
+    answer = 42
+  flags: [-j]
+  config: |
+    plugin:
+      yaml-parser:
+        name: toml
+        install: true
+  error: TOML parser configuration must be empty
+
+- name: Token mode rejects parser plugins
+  input: |
+    answer = 42
+  flags: [--plugin=yaml-parser=toml, -t]
+  error: parser plugins are not supported

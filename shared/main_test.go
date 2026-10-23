@@ -8,7 +8,15 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/yamlstar/yamlstar-plugin-parser-toml/parser"
 )
+
+func TestManifestVersion(t *testing.T) {
+	if !strings.Contains(manifest, `:version "`+parser.Version+`"`) {
+		t.Fatalf("manifest does not match parser version: %s", manifest)
+	}
+}
 
 func TestParseEvents(t *testing.T) {
 	encoded, err := parseEvents([]byte("answer = 42 # value\n"), []byte("{}"))

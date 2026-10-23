@@ -22,7 +22,7 @@ import (
 )
 
 const manifest = `{:abi 2 :api "parser" :kind "event-source" ` +
-	`:name "toml" :version "0.1.0" ` +
+	`:name "toml" :version "` + parser.Version + `" ` +
 	`:event-format "yamlstar-events-edn-v1"}`
 
 //export yamlstar_plugin_v2_abi

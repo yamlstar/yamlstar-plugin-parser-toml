@@ -10,7 +10,7 @@ gh=${GH:-gh}
 release_repo=${RELEASE_REPO:-yamlstar/yamlstar-plugin-parser-toml}
 release_workflow=${RELEASE_WORKFLOW:-release.yaml}
 dry_run=${YS_RELEASE_DRYRUN:-}
-version_files=(Makefile Meta plugin.edn test/abi.c)
+version_files=(Makefile Meta plugin.edn test/abi.c parser/parser.go)
 
 die() {
   printf 'ERROR: %s\n' "$*" >&2
@@ -49,12 +49,18 @@ abi_version() {
     test/abi.c
 }
 
+parser_version() {
+  # shellcheck disable=SC2016
+  "$perl" -ne 'print "$1\n" if /^const Version = "([^"]+)"/' parser/parser.go
+}
+
 current_version() {
-  local manifest meta makefile abi
+  local manifest meta makefile abi parser
   manifest=$(manifest_version)
   meta=$(meta_version)
   makefile=$(make_version)
   abi=$(abi_version)
+  parser=$(parser_version)
   [[ -n $manifest ]] || die 'No version found in plugin.edn'
   [[ $manifest == "$meta" ]] ||
     die "Meta version $meta does not match plugin.edn $manifest"
@@ -62,6 +68,8 @@ current_version() {
     die "Makefile version $makefile does not match plugin.edn $manifest"
   [[ $manifest == "$abi" ]] ||
     die "ABI test version $abi does not match plugin.edn $manifest"
+  [[ $manifest == "$parser" ]] ||
+    die "Parser version $parser does not match plugin.edn $manifest"
   printf '%s\n' "$manifest"
 }
 
@@ -93,14 +101,14 @@ do_list() {
 TOML Parser Plugin Release Process
 ==================================
 
-Publish the already-versioned first release:
-  make release v=0.1.0
+Publish the already-versioned release:
+  make release v=0.1.1
 
 Run a complete version-bump release:
-  make release o=0.1.0 v=0.1.1
+  make release o=0.1.1 v=0.1.2
 
 Preview either workflow without changing anything:
-  make release o=0.1.0 v=0.1.1 d=1
+  make release o=0.1.1 v=0.1.2 d=1
 
 Individual steps:
   make release-sanity-check o=OLD_VERSION v=NEW_VERSION
@@ -210,6 +218,14 @@ do_version_bump() {
     }
     s/^#define PLUGIN_VERSION "\Q$old\E"$/#define PLUGIN_VERSION "$new"/;
   ' test/abi.c
+  # shellcheck disable=SC2016
+  RELEASE_OLD=$current RELEASE_NEW=$new_version "$perl" -pi -e '
+    BEGIN {
+      $old = $ENV{RELEASE_OLD};
+      $new = $ENV{RELEASE_NEW};
+    }
+    s/^const Version = "\Q$old\E"$/const Version = "$new"/;
+  ' parser/parser.go
 
   [[ $(current_version) == "$new_version" ]] ||
     die 'Version bump did not update every version file'
@@ -260,6 +276,8 @@ do_tag() {
   [[ $(current_version) == "$new_version" ]] ||
     die "Version files do not contain $new_version"
 
+  check_new_tag "$(binary_tag "$new_version")"
+  check_new_tag "$(module_tag "$new_version")"
   create_tag "$(binary_tag "$new_version")"
   create_tag "$(module_tag "$new_version")"
 }
@@ -387,9 +405,19 @@ do_retry() {
       --jq '.assets | length' 2>/dev/null || printf '0\n'
   )
 
+  [[ $(git rev-parse "$binary^{commit}") == \
+     $(git rev-parse "$module^{commit}") ]] ||
+    die 'Binary and Go module tags must identify the same commit'
+  if [[ $asset_count == 0 ]]; then
+    [[ $(git rev-parse "$binary^{commit}") == $(git rev-parse HEAD) ]] ||
+      die 'Go module tags are immutable; release a new version for new commits'
+    tag_points_to_head "$binary"
+    tag_points_to_head "$module"
+  fi
+
   if [[ -n $dry_run ]]; then
     if [[ $asset_count == 0 ]]; then
-      printf 'Would update branch %s and tags %s and %s, then rerun ' \
+      printf 'Would publish branch %s and tags %s and %s, then rerun ' \
         "$branch" "$binary" "$module"
       printf 'the workflow\n'
     else
@@ -403,12 +431,7 @@ do_retry() {
     return
   fi
 
-  git tag -f "$binary" HEAD
-  git tag -f "$module" HEAD
-  git push --atomic origin \
-    "$branch" \
-    "+refs/tags/$binary:refs/tags/$binary" \
-    "+refs/tags/$module:refs/tags/$module"
+  do_push
   do_build_github
 }
 
