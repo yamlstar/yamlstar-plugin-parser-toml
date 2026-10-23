@@ -45,7 +45,7 @@ jobs:
       uses: actions/checkout@v5
       with:
         repository: yaml/go-yaml
-        ref: 32734c39dedb70116a90a5d59e26580a3e7bf71f
+        ref: 4d29db4627bfdd366bde04fce6575dd404a0df74
         path: repos/go-yaml
 
     - name: Test generic go-yaml CLI build

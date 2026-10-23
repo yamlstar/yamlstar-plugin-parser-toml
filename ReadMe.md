@@ -98,6 +98,8 @@ including scalar tags and TOML comment metadata.
 
 `make test-goyaml-cli` uses the sibling go-yaml checkout by default.
 Set `GO_YAML_DIR` to another checkout when needed.
+Set `GO_YAML_REF` to test a specific commit from that checkout, such as the
+revision pinned in CI, without changing its branch or working files.
 The test stages disposable sources and a local module proxy under `.cache/`,
 builds through the generic package mechanism, and preserves the original CLI.
 
