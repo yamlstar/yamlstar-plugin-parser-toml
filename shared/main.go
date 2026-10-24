@@ -21,7 +21,7 @@ import (
 	"github.com/yamlstar/yamlstar-plugin-parser-toml/parser"
 )
 
-const manifest = `{:abi 2 :api "parser" :kind "event-source" ` +
+const manifest = `{:abi 2 :api "yaml-parser" :kind "event-source" ` +
 	`:name "toml" :version "` + parser.Version + `" ` +
 	`:event-format "yamlstar-events-edn-v1"}`
 

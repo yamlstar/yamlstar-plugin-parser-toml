@@ -1,5 +1,5 @@
 {:abi 2
- :api "parser"
+ :api "yaml-parser"
  :kind "event-source"
  :name "toml"
  :version "0.1.2"

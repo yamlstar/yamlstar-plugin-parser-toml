@@ -19,11 +19,13 @@ construct the same JSON-compatible values.
 Use the plugin with YAMLStar:
 
 ```bash
-yaml --plugin=parser=toml document.toml
+yaml --plugin=yaml-parser=toml document.toml
 ```
 
-YAMLStar uses the `parser` API name.
-The go-yaml adapter uses `yaml-parser`.
+YAMLStar and go-yaml both use the `yaml-parser` API name.
+The shared manifest also declares `:api "yaml-parser"`.
+Updated YAMLStar hosts reject older `:api "parser"` libraries; rebuild or
+install an updated shared library when upgrading the host.
 
 ## go-yaml adapter
 

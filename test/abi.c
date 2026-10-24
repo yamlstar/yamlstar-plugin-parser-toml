@@ -73,7 +73,7 @@ int main(void) {
         fail("manifest call failed");
     }
     char *text = take_output(free_output, output, length);
-    if (strstr(text, ":api \"parser\"") == NULL ||
+    if (strstr(text, ":api \"yaml-parser\"") == NULL ||
         strstr(text, ":name \"toml\"") == NULL ||
         strstr(text, ":kind \"event-source\"") == NULL ||
         strstr(text, ":version \"" PLUGIN_VERSION "\"") == NULL) {
