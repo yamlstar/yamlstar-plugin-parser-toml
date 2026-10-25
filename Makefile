@@ -26,7 +26,7 @@ SHELL-NAME := makes yamlstar-plugin-parser-toml
 include $(MAKES)/shell.mk
 
 CLJ-CONFIG := $(CURDIR)/.cache/clojure
-VERSION := 0.1.2
+VERSION := 0.1.3
 PLUGIN := yamlstar-plugin-parser-toml
 GENERATED-CLJ := generated/clj/toml_parser/core.clj
 GLOAT-LINK := .cache/gloat-srcs/toml_parser/core.clj

@@ -16,7 +16,7 @@ import (
 )
 
 // Version is the parser release version.
-const Version = "0.1.2"
+const Version = "0.1.3"
 
 // Event is a portable YAML parser event.
 type Event struct {

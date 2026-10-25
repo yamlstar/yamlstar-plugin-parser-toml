@@ -2,5 +2,5 @@
  :api "yaml-parser"
  :kind "event-source"
  :name "toml"
- :version "0.1.2"
+ :version "0.1.3"
  :event-format "yamlstar-events-edn-v1"}
